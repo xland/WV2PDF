@@ -9,7 +9,11 @@
             "UNICODE",
             "_UNICODE"
           ],
-        "sources": [ "src/main.cc" ]
+        "sources": [ 
+            "src/main.cc",
+            "src/Worker.h",
+            "src/Worker.cc"
+            ]
     }
   ]
 }

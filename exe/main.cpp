@@ -1,9 +1,16 @@
 #include <Windows.h>
+#include <filesystem>
+#include <shlobj.h>
 #include <wrl.h>
 #include <WebView2.h>
+#include <DispatcherQueue.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Data.Json.h>
+#include <functional>
+#include <winrt/Windows.System.h>
 #include <vector>
+#include <libipc/ipc.h>
 
 using namespace Microsoft::WRL;
 ComPtr<ICoreWebView2Environment6> env6;
@@ -11,7 +18,9 @@ ComPtr<ICoreWebView2PrintSettings> printSettings;
 std::vector<ComPtr<ICoreWebView2Controller>> ctrls;
 std::vector<ComPtr<ICoreWebView2>> webviews;
 RECT bounds{ 0,0,1,1 };
-
+std::unique_ptr<ipc::route> ipcIns;
+winrt::Windows::System::DispatcherQueue dq{ winrt::Windows::System::DispatcherQueue::GetForCurrentThread() };
+winrt::Windows::System::DispatcherQueueController controller{ nullptr };
 HWND hwnd;
 
 
@@ -59,12 +68,25 @@ void loadUrl() {
 
 
 void createWebView2() {
-	CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
+    PWSTR pathTmp;
+    auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &pathTmp);
+    if (FAILED(hr))
+    {
+        CoTaskMemFree(pathTmp);
+        MessageBox(NULL, L"无法得到应用数据目录", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    std::filesystem::path appDir{ pathTmp };
+    CoTaskMemFree(pathTmp);
+    appDir /= "WV2PDFWINDOW";
+    auto dataPath = appDir.wstring();
+	CreateCoreWebView2EnvironmentWithOptions(nullptr, dataPath.data(), nullptr,
 		Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
 			[](HRESULT result, ICoreWebView2Environment* env){
                 env->QueryInterface(IID_PPV_ARGS(&env6));
 				env6->CreatePrintSettings(&printSettings);
                 printSettings->put_Orientation(COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE);
+                ipcIns->send("");
 				return S_OK;
 			}).Get());
 }
@@ -102,8 +124,35 @@ void createWindow(HINSTANCE hInstance)
     ShowWindow(hwnd, SW_SHOW);
 }
 
+winrt::fire_and_forget waitMsg()
+{
+    ipcIns = std::make_unique<ipc::route>("my-ipc-route", ipc::receiver);
+    co_await winrt::resume_background();
+    while (true) {
+        auto buf = ipcIns->recv();
+        auto str = static_cast<char*>(buf.data());
+        if (str == nullptr || str[0] == '\0') break;
+        auto msg = std::string{ str };
+        co_await winrt::resume_foreground(dq);
+        if (msg == "loadUrl") {
+            //env6.Navigate(L"https://example.com");
+        }
+        else if (msg == "loadHtml") {
+        }
+        co_await winrt::resume_background();
+    }
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nCmdShow)
 {
+    DispatcherQueueOptions options{
+        sizeof(DispatcherQueueOptions),
+        DQTYPE_THREAD_CURRENT,
+        DQTAT_COM_NONE
+    };
+    CreateDispatcherQueueController(options,
+        reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller)));
+    waitMsg();
 	createWindow(hInstance);
 	createWebView2();
     MSG msg;
