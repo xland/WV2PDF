@@ -1,0 +1,23 @@
+{
+  "name": "wv2pdf",
+  "version": "1.0.0",
+  "description": "WebView2 Create PDF",
+  "homepage": "https://github.com/xland/WV2PDF#readme",
+  "bugs": {
+    "url": "https://github.com/xland/WV2PDF/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xland/WV2PDF.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.5.0"
+  }
+}
