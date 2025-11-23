@@ -1,8 +1,9 @@
-#include <Windows.h>
+﻿#include <Windows.h>
 #include <filesystem>
 #include <shlobj.h>
 #include <wrl.h>
 #include <WebView2.h>
+#include <thread>
 #include <DispatcherQueue.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -10,20 +11,18 @@
 #include <functional>
 #include <winrt/Windows.System.h>
 #include <vector>
-#include <libipc/ipc.h>
+#include <ixwebsocket/IXWebSocketServer.h>
+#include <iostream>
 
 using namespace Microsoft::WRL;
+using namespace winrt::Windows::Data::Json;
 ComPtr<ICoreWebView2Environment6> env6;
 ComPtr<ICoreWebView2PrintSettings> printSettings;
 std::vector<ComPtr<ICoreWebView2Controller>> ctrls;
 std::vector<ComPtr<ICoreWebView2>> webviews;
 RECT bounds{ 0,0,1,1 };
-std::unique_ptr<ipc::route> ipcIns;
-winrt::Windows::System::DispatcherQueue dq{ winrt::Windows::System::DispatcherQueue::GetForCurrentThread() };
-winrt::Windows::System::DispatcherQueueController controller{ nullptr };
 HWND hwnd;
-
-
+ix::WebSocketServer* server;
 
 void loadUrl() {
     env6->CreateCoreWebView2Controller(hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
@@ -86,7 +85,6 @@ void createWebView2() {
                 env->QueryInterface(IID_PPV_ARGS(&env6));
 				env6->CreatePrintSettings(&printSettings);
                 printSettings->put_Orientation(COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE);
-                ipcIns->send("");
 				return S_OK;
 			}).Get());
 }
@@ -97,6 +95,13 @@ LRESULT CALLBACK windowMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DESTROY:
         {
             PostQuitMessage(0);
+            return 0;
+        }
+        case WM_APP + 100:
+        {
+            std::string* p = reinterpret_cast<std::string*>(lParam);
+            std::string url = *p;
+            delete p;
             return 0;
         }
     }
@@ -124,35 +129,55 @@ void createWindow(HINSTANCE hInstance)
     ShowWindow(hwnd, SW_SHOW);
 }
 
-winrt::fire_and_forget waitMsg()
-{
-    ipcIns = std::make_unique<ipc::route>("my-ipc-route", ipc::receiver);
-    co_await winrt::resume_background();
-    while (true) {
-        auto buf = ipcIns->recv();
-        auto str = static_cast<char*>(buf.data());
-        if (str == nullptr || str[0] == '\0') break;
-        auto msg = std::string{ str };
-        co_await winrt::resume_foreground(dq);
-        if (msg == "loadUrl") {
-            //env6.Navigate(L"https://example.com");
+void procMsg(const std::string& msg) {
+    winrt::hstring str = winrt::to_hstring(msg);
+    JsonObject param = JsonObject::Parse(str);
+    auto action = param.GetNamedString(L"action");
+    if (action == L"url2pdf") {
+        auto url = param.GetNamedString(L"url");
+        for (auto& client : server->getClients())
+        {
+            client->send("msg format ok");
         }
-        else if (msg == "loadHtml") {
-        }
-        co_await winrt::resume_background();
+        //wsClient->send("消息格式正确");
     }
 }
 
+void waitMsg()
+{
+    ix::initNetSystem();
+    server = new ix::WebSocketServer(8080, "0.0.0.0",  ix::SocketServer::kDefaultTcpBacklog,  ix::SocketServer::kDefaultMaxConnections,
+        ix::WebSocketServer::kDefaultHandShakeTimeoutSecs, ix::SocketServer::kDefaultAddressFamily, 36);
+    server->disablePerMessageDeflate();       // 关闭压缩
+    server->disablePong();  // 有些客户端不发 pong 也会被踢
+    server->setOnClientMessageCallback([](std::shared_ptr<ix::ConnectionState> connectionState,
+        ix::WebSocket& webSocket, const ix::WebSocketMessagePtr& msg) {
+        if (msg->type == ix::WebSocketMessageType::Message)
+        {
+            for (auto& client : server->getClients())
+            {
+                client->send("receive msg");
+            }
+            procMsg(msg->str);
+        }
+    });
+    auto res = server->listen();
+    if (!res.first)
+    {
+        return;
+    }
+    server->start();
+    server->wait();
+    // Block until server.stop() is called.
+    //ix::uninitNetSystem();
+}
+
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nCmdShow)
 {
-    DispatcherQueueOptions options{
-        sizeof(DispatcherQueueOptions),
-        DQTYPE_THREAD_CURRENT,
-        DQTAT_COM_NONE
-    };
-    CreateDispatcherQueueController(options,
-        reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(controller)));
-    waitMsg();
+    //waitMsg();
+    std::thread wsThread(waitMsg);
+    wsThread.detach();
 	createWindow(hInstance);
 	createWebView2();
     MSG msg;

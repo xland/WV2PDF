@@ -1,6 +1,9 @@
 #include <napi.h>
 #include <Windows.h>
 #include "Worker.h"
+#include <libipc/ipc.h>
+
+std::unique_ptr<ipc::route> ipcIns;
 
 Napi::Value Init(const Napi::CallbackInfo &info)
 {
@@ -22,10 +25,9 @@ Napi::Value Init(const Napi::CallbackInfo &info)
     WCHAR cmd[] = L"D:\\project\\WV2PDF\\exe\\x64\\Debug\\SimpleDemo.exe";
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi = {};
-    BOOL success = CreateProcess(
-        nullptr, cmd, nullptr, nullptr,
-        FALSE, CREATE_SUSPENDED, // 暂停启动
-        nullptr, nullptr, &si, &pi);
+    BOOL success = CreateProcess(nullptr, cmd, nullptr, nullptr,
+                                 FALSE, CREATE_SUSPENDED, // 暂停启动
+                                 nullptr, nullptr, &si, &pi);
     if (!success)
     {
         CloseHandle(hJob);
@@ -41,9 +43,10 @@ Napi::Value Init(const Napi::CallbackInfo &info)
         Napi::Error::New(env, "Failed to assign process to job").ThrowAsJavaScriptException();
         return env.Undefined();
     }
+    ipcIns = std::make_unique<ipc::route>("WV2PDF", ipc::sender);
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess); // 不要 CloseHandle(hJob) —— 让它随父进程退出自动销毁
+    CloseHandle(pi.hProcess); //不要 CloseHandle(hJob) —— 让它随父进程退出自动销毁
     Napi::Object result = Napi::Object::New(env);
     result.Set("ok", true);
     return result;
