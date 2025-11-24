@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <wrl.h>
 #include <WebView2.h>
+
 #include <thread>
 #include <DispatcherQueue.h>
 #include <winrt/Windows.Foundation.h>
@@ -22,45 +23,84 @@ std::vector<ComPtr<ICoreWebView2Controller>> ctrls;
 std::vector<ComPtr<ICoreWebView2>> webviews;
 RECT bounds{ 0,0,1,1 };
 HWND hwnd;
-ix::WebSocketServer* server;
+std::unique_ptr<ix::WebSocketServer> server;
+std::wstring curPath;
 
-void loadUrl() {
+class Msg
+{
+public:
+    ix::WebSocket* client{nullptr};
+    JsonObject data;
+    void send(const std::string& str) {
+        if (client->getReadyState() != ix::ReadyState::Open) return;
+        client->sendText(str);
+    }
+};
+
+
+void navigateEnd(ICoreWebView2* wv, Msg* msg)
+{
+    LPWSTR uri = nullptr;
+    wv->get_Source(&uri);
+    std::wstring url(uri);
+    CoTaskMemFree(uri);
+    if (url == L"about:blank") {
+        return;
+    }
+    ComPtr<ICoreWebView2_7> webview7;
+    wv->QueryInterface(IID_PPV_ARGS(&webview7));
+    static int pathName{ 0 };
+    pathName += 1;
+    auto filePath = std::format(L"{}\\{}.pdf", curPath, pathName);
+    auto fileName = std::format("{}.pdf", pathName);
+    webview7->PrintToPdf(filePath.data(), printSettings.Get(),
+        Callback<ICoreWebView2PrintToPdfCompletedHandler>(
+            [webview7,msg, fileName](HRESULT errorCode, BOOL isSuccessful) {
+                if (SUCCEEDED(errorCode) && isSuccessful) {
+                    auto msgStr = "{\"isFinish\":true, \"msg\" :\""+ fileName +"\", \"ok\":true}";
+                    msg->send(msgStr);
+                }
+                else
+                {
+                    msg->send(R"({"isFinish":true, "msg":"err", "ok":false})");
+                }
+                webview7->Navigate(L"about:blank");
+                return S_OK;
+            }).Get());
+}
+
+void loadUrl(Msg* msg) {
+    winrt::hstring url = msg->data.GetNamedString(L"url");
+    for (auto& wv: webviews)
+    {
+        LPWSTR uri = nullptr;
+        wv->get_Source(&uri);
+        std::wstring curUrl(uri);
+        CoTaskMemFree(uri);
+        if (curUrl == L"about:blank") {
+            wv->Navigate(url.data());
+            return;
+        }
+    }
+    if (webviews.size() > 18) {
+        auto msgStr = R"({"isFinish":false,
+"msg":"18 resource slots are currently in use. Please try again later.",
+"ok":false})";
+        msg->send(msgStr);
+    }
     env6->CreateCoreWebView2Controller(hwnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-        [](HRESULT result, ICoreWebView2Controller* controller) {
+        [url,msg](HRESULT result, ICoreWebView2Controller* controller) {
             ctrls.push_back(controller);
             ComPtr<ICoreWebView2> webview;
             controller->get_CoreWebView2(&webview);
             controller->put_Bounds(bounds);
             webviews.push_back(webview);
-            webview->add_NavigationCompleted(Callback<ICoreWebView2NavigationCompletedEventHandler>([](ICoreWebView2* wv, ICoreWebView2NavigationCompletedEventArgs* arg) {                
-                LPWSTR rawUri = nullptr;
-                wv->get_Source(&rawUri);
-                std::wstring url(rawUri);
-                CoTaskMemFree(rawUri);
-                if (url == L"about:blank") {
-                    return S_OK;
-                }
-                ComPtr<ICoreWebView2_7> webview7;
-                wv->QueryInterface(IID_PPV_ARGS(&webview7));
-                webview7->PrintToPdf(
-                    L"D:\\1.pdf", printSettings.Get(),
-                    Callback<ICoreWebView2PrintToPdfCompletedHandler>(
-                        [&webview7](HRESULT errorCode, BOOL isSuccessful) {
-                            if (SUCCEEDED(errorCode) && isSuccessful) {
-
-                            }
-                            else
-                            {
-
-                            }
-                            webview7->Navigate(L"about:blank");
-                            return S_OK;
-                        })
-                    .Get());
+            auto navigateEndCB = Callback<ICoreWebView2NavigationCompletedEventHandler>([msg](auto wv, auto args) {
+                navigateEnd(wv,msg);
                 return S_OK;
-
-                }).Get(), NULL);
-            webview->Navigate(L"https://www.baidu.com");
+            });
+            webview->add_NavigationCompleted(navigateEndCB.Get(), NULL);
+            webview->Navigate(url.data());
             return S_OK;
         }).Get());
 }
@@ -99,9 +139,7 @@ LRESULT CALLBACK windowMsg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_APP + 100:
         {
-            std::string* p = reinterpret_cast<std::string*>(lParam);
-            std::string url = *p;
-            delete p;
+            loadUrl((Msg*)lParam);
             return 0;
         }
     }
@@ -123,42 +161,27 @@ void createWindow(HINSTANCE hInstance)
     wcex.lpszMenuName = nullptr;
     wcex.lpszClassName = L"WV2PDFWINDOW";
     wcex.hIconSm = LoadIcon(wcex.hInstance, (LPCTSTR)IDI_WINLOGO);
-    RegisterClassExW(&wcex);
+    RegisterClassEx(&wcex);
     hwnd = CreateWindowEx(WS_EX_TOOLWINDOW, wcex.lpszClassName, wcex.lpszClassName, WS_POPUP,
         -999999, -999999, 1, 1, nullptr, nullptr, hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
 }
 
-void procMsg(const std::string& msg) {
-    winrt::hstring str = winrt::to_hstring(msg);
-    JsonObject param = JsonObject::Parse(str);
-    auto action = param.GetNamedString(L"action");
-    if (action == L"url2pdf") {
-        auto url = param.GetNamedString(L"url");
-        for (auto& client : server->getClients())
-        {
-            client->send("msg format ok");
-        }
-        //wsClient->send("消息格式正确");
-    }
-}
-
 void waitMsg()
 {
     ix::initNetSystem();
-    server = new ix::WebSocketServer(8080, "0.0.0.0",  ix::SocketServer::kDefaultTcpBacklog,  ix::SocketServer::kDefaultMaxConnections,
+    server = std::make_unique<ix::WebSocketServer>(8080, "0.0.0.0",  ix::SocketServer::kDefaultTcpBacklog,  ix::SocketServer::kDefaultMaxConnections,
         ix::WebSocketServer::kDefaultHandShakeTimeoutSecs, ix::SocketServer::kDefaultAddressFamily, 36);
-    server->disablePerMessageDeflate();       // 关闭压缩
-    server->disablePong();  // 有些客户端不发 pong 也会被踢
     server->setOnClientMessageCallback([](std::shared_ptr<ix::ConnectionState> connectionState,
         ix::WebSocket& webSocket, const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Message)
         {
-            for (auto& client : server->getClients())
-            {
-                client->send("receive msg");
-            }
-            procMsg(msg->str);
+            webSocket.send(R"({"isFinish":false,"msg":"receive msg","ok":true})");
+            winrt::hstring str = winrt::to_hstring(msg->str);
+            auto msg = new Msg();
+            msg->data = JsonObject::Parse(str);
+            msg->client = &webSocket;
+            PostMessage(hwnd, WM_APP + 100, NULL, (LPARAM)msg);
         }
     });
     auto res = server->listen();
@@ -168,14 +191,14 @@ void waitMsg()
     }
     server->start();
     server->wait();
-    // Block until server.stop() is called.
-    //ix::uninitNetSystem();
 }
 
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPTSTR lpCmdLine, _In_ int nCmdShow)
 {
-    //waitMsg();
+    curPath = std::filesystem::path(
+        std::filesystem::canonical(std::filesystem::current_path())
+    ).wstring();
     std::thread wsThread(waitMsg);
     wsThread.detach();
 	createWindow(hInstance);
@@ -186,5 +209,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    server->stop();
+    ix::uninitNetSystem();
     return 0;
 }
