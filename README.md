@@ -35,3 +35,5 @@ ws.on("message", (data) => {
 ws.on("close", () => console.log("conn closed"));
 ws.on("error", (err) => console.error("error:", err));
 ```
+
+- The PDF file will be created in the current directory
